@@ -1,0 +1,139 @@
+import pandas as pd
+import re
+from transformers import pipeline
+import torch
+
+# ===========================
+# TEXT CLEANING function
+# ===========================
+def clean_text_advanced(text):
+    """Optimized cleaning function"""
+    if not isinstance(text, str):
+        return ""
+    
+    text = text.lower()
+    
+    patterns = [
+        (r'https?://\S+|www\.\S+', ''),  # URLs
+        (r'\b\w+\.(?:jpg|jpeg|png|gif|pdf|docx?|txt|csv|mp3|mp4)\b', ''),  # Files
+        (r'(.)\1{2,}', r'\1\1'),  # Repeated chars
+        (r'\b[bcdfghjklmnpqrstvwxyz0-9]{5,}\b', '', re.I),  # No-vowel strings
+        (r'\b[a-z0-9]{3,}\d+[a-z0-9]*\b|\b\d+[a-z0-9]+\b', ''),  # Mixed alphanum
+        (r"[^a-z0-9\s.,!?']", ''),  # Special chars
+        (r'\s+', ' ')  # Extra spaces
+    ]
+    
+    for pattern, replacement in patterns:
+        if len(pattern) == 3:  # Pattern with flags
+            text = re.sub(pattern[0], replacement, text, flags=pattern[2])
+        else:
+            text = re.sub(pattern, replacement, text)
+    
+    return text.strip()
+
+# ======================
+# MAIN function
+# ======================
+def main():
+
+    
+    # Load data
+    input_file = "review.csv"
+    try:
+        df = pd.read_csv(input_file)
+    except FileNotFoundError:
+        print(f" Error: File '{input_file}' not found.")
+        return
+    
+    # Check required columns
+    if 'text' not in df.columns:
+        print("Error: CSV must contain a 'text' column.")
+        return
+    
+    
+    # ======================
+    # Actually CLEAN TEXT
+    # ======================
+        df['cleaned_text'] = df['text'].apply(clean_text_advanced)
+    
+    # Save cleaned data
+    cleaned_file = "cleaned_data.csv"
+    df[['id', 'text', 'cleaned_text']].to_csv(cleaned_file, index=False)
+    print(f"✅ Cleaned data saved to: {cleaned_file}")
+    
+    # ======================
+    # SENTIMENT ANALYSIS 
+    # ======================
+    print("\n Loading sentiment model...")
+    
+    # Use GPU if available
+    device = 0 if torch.cuda.is_available() else -1
+    if device == 0:
+        print("   Using GPU acceleration")
+    else:
+        print("   Using CPU (GPU not available)")
+    
+    # Initialize classifier with batching
+    classifier = pipeline(
+        "sentiment-analysis",
+        model="distilbert-base-uncased-finetuned-sst-2-english",
+        device=device,
+        batch_size=8,  # Process 8 at a time for speed
+        truncation=True
+    )
+    
+    # ======================
+    # BATCH PROCESSING
+    # ======================
+    print("Analyzing sentiment (batch processing)...")
+    
+    # Process in batches for speed
+    texts = df['cleaned_text'].astype(str).tolist()
+    predictions = []
+    
+    batch_size = 8
+    for i in range(0, len(texts), batch_size):
+        batch = texts[i:i+batch_size]
+        batch_results = classifier(batch)
+        predictions.extend(batch_results)
+        
+        # Progress indicator
+        if (i // batch_size) % 10 == 0:
+            print(f"   Progress: {min(i+batch_size, len(texts))}/{len(texts)} rows")
+    
+    # ======================
+    # RESULTS
+    # ======================
+    
+    
+    def process_prediction(result):
+        label = 'positive' if result['label'] == 'POSITIVE' else 'negative'
+        score = round(result['score'], 4)
+        
+        # Optional: Add neutral category for low confidence
+        if score < 0.7:
+            return 'neutral', score
+        return label, score
+    
+    # Apply to all predictions
+    processed = [process_prediction(p) for p in predictions]
+    df['model_label'] = [p[0] for p in processed]
+    df['model_confidence'] = [p[1] for p in processed]
+    
+    # ======================
+    # SAVE & REPORT
+    # ======================
+    output_file = "labeled_data.csv"
+    df.to_csv(output_file, index=False)
+    
+      
+    # Sample output
+    print("\n  SAMPLE PREDICTIONS:")
+    sample = df.head(5)
+    for _, row in sample.iterrows():
+        text_preview = row['cleaned_text'][:60] + "..." if len(row['cleaned_text']) > 60 else row['cleaned_text']
+        print(f"   [{row['model_label']:8} | {row['model_confidence']:.3f}] {text_preview}")
+
+# Run the script
+if __name__ == "__main__":
+    main()
